@@ -277,6 +277,8 @@ fork(void)
 
   np->parent = p;
 
+  np->syscall_trace = p->syscall_trace;
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -290,6 +292,8 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+
+  
 
   pid = np->pid;
 
@@ -692,4 +696,18 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+
+uint64             
+getprocnum(void)
+{
+  uint64 procnum = 0;
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    if (p->state != UNUSED)
+      procnum++;
+  }
+  return procnum;
 }
