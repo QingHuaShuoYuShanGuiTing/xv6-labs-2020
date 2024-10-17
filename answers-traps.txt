@@ -1,0 +1,22 @@
+1.Which registers contain arguments to functions? For example, which register holds 13 in main's call to printf?
+A: 在a0-a7中存放参数，13存放在a2中
+
+2.Where is the call to function f in the assembly code for main? Where is the call to g? (Hint: the compiler may inline functions.)
+A: 在C代码中，main调用f，f调用g。
+
+3.At what address is the function printf located?
+A: 0X630.
+
+4.What value is in the register ra just after the jalr to printf in main?
+A: 0X630.
+
+5.Run the following code. 
+    unsigned int i = 0x00646c72;
+	printf("H%x Wo%s", 57616, &i);
+What is the output? Here's an ASCII table that maps bytes to characters.   
+The output depends on that fact that the RISC-V is little-endian. If the RISC-V were instead big-endian what would you set i to in order to yield the same output? 
+Would you need to change 57616 to a different value?
+A:A:HE110 World；i=0x726c6400；不需要将57616改为其他值。
+
+6.In the following code, what is going to be printed after 'y='? (note: the answer is not a specific value.) Why does this happen?
+A: 原本需要两个参数，却只传入了一个，因此y=后面打印的结果取决于之前a2中保存的数据。
