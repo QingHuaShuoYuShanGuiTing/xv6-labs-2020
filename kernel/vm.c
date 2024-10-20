@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -181,9 +183,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +317,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;     
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;  
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -354,6 +356,10 @@ uvmclear(pagetable_t pagetable, uint64 va)
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
+  //lazy allocation
+  if(uvmislazyalloc(dstva))
+    uvmlazyalloc(dstva);
+
   uint64 n, va0, pa0;
 
   while(len > 0){
@@ -379,6 +385,10 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
+  //lazy allocation
+  if(uvmislazyalloc(srcva))
+    uvmlazyalloc(srcva);
+    
   uint64 n, va0, pa0;
 
   while(len > 0){
@@ -405,6 +415,10 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
+  //lazy allocation
+  if(uvmislazyalloc(srcva))
+    uvmlazyalloc(srcva);
+  
   uint64 n, va0, pa0;
   int got_null = 0;
 
@@ -439,4 +453,28 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+void uvmlazyalloc(uint64 va){
+  struct proc *p = myproc();
+  va = PGROUNDDOWN(va);
+  uint64 pa = (uint64)kalloc();
+  if(pa == 0){
+    printf("lazy alloc: pa = 0\n");
+    p->killed = 1;
+  }else{
+    memset((void*)pa, 0, PGSIZE);
+    if(mappages(p->pagetable, va, PGSIZE, pa, PTE_W|PTE_U|PTE_R|PTE_X) != 0){
+      printf("lazy alloc: failed to map page\n");
+      kfree((void*)pa);
+      p->killed = 1;
+    }
+  }
+}
+
+int uvmislazyalloc( uint64 va){
+  va = PGROUNDDOWN(va);
+  struct proc *p = myproc();
+  pte_t *pte;
+  return (va > PGROUNDDOWN(p->trapframe->sp) && va < p->sz && ((pte = walk(p->pagetable, va, 0)) == 0||(*pte & PTE_V) == 0));
 }

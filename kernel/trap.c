@@ -67,7 +67,26 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if(r_scause() == 13 || r_scause() == 15){
+    // page fault
+    uint64 va = r_stval();
+    va = PGROUNDDOWN(va);
+    uint64 pa = (uint64)kalloc();
+
+    if(va > p->sz||va < PGROUNDUP(p->trapframe->sp)||pa == 0){
+      //printf("lazy alloc: va > p->sz || va < PGROUNDUP(p->trapframe->sp) || pa = 0\n");
+      p->killed = 1;
+    }   
+    else{
+      memset((void*)pa, 0, PGSIZE);
+      if(mappages(p->pagetable, va, PGSIZE, pa, PTE_W|PTE_U|PTE_R|PTE_X) != 0){
+        //printf("lazy alloc: failed to map page\n");
+        kfree((void*)pa);
+        p->killed = 1;
+      }
+    }
+  }
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
