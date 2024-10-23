@@ -8,6 +8,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "proc.h"
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -23,10 +24,16 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct ref_stru {
+  struct spinlock lock;
+  int ref_count[PHYSTOP / PGSIZE];  // 引用计数
+} ref;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&ref.lock, "ref");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +42,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    ref.ref_count[(uint64)p / PGSIZE] = 1;
     kfree(p);
+  } 
 }
 
 // Free the page of physical memory pointed at by v,
@@ -52,14 +61,20 @@ kfree(void *pa)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
+  
+  acquire(&ref.lock);
+  if(--ref.ref_count[(uint64)pa / PGSIZE] == 0){
+    release(&ref.lock);
 
-  r = (struct run*)pa;
+    r = (struct run*)pa;
+    memset(pa, 1, PGSIZE);
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+    acquire(&kmem.lock);
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+  }else
+    release(&ref.lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -72,11 +87,113 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    acquire(&ref.lock);
+    ref.ref_count[(uint64)r / PGSIZE] = 1;  // 将引用计数初始化为1
+    release(&ref.lock);
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+/**
+ * @brief uvmcowcheck 判断一个页面是否为COW页面
+ * @param pagetable 指定查询的页表
+ * @param va 虚拟地址
+ * @return 1 是 0 不是
+ */
+int 
+uvmcowcheck(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  struct proc *p = myproc();
+
+  if (va > p->sz)
+    return 0;
+
+  if((pte = walk(pagetable, va, 0))== 0)
+    return 0;
+
+  if((*pte & PTE_V) == 0)
+    return 0;
+  
+  return *pte & PTE_C? 1 : 0;
+}
+
+/**
+ * @brief uvmcowcopy copy-on-write分配器
+ * @param pagetable 指定页表
+ * @param va 指定的虚拟地址,必须页面对齐
+ * @return 分配后va对应的物理地址，如果返回0则分配失败
+ */
+void*
+uvmcowcopy(pagetable_t pagetable, uint64 va)
+{
+  if(va % PGSIZE != 0)
+    return 0;
+
+  pte_t *pte;
+  if((pte = walk(pagetable, va, 0))==0){
+    panic("uvmcowcopy: pte should be exited");
+  }
+
+  uint64 pa = PTE2PA(*pte); 
+  if(pa == 0)
+    return 0;
+
+  if(getrefcount(pa) == 1){
+    *pte |= PTE_W;
+    *pte &= ~PTE_C;
+    return (void*)pa;
+  }else{
+    void* mem = kalloc();
+
+    if(mem == 0)
+      return 0;
+    
+    memmove(mem, (void*)pa, PGSIZE);
+
+    *pte &= ~PTE_V;
+
+    if(mappages(pagetable, va, PGSIZE, (uint64)mem, (PTE_FLAGS(*pte) | PTE_W) & ~PTE_C) != 0){
+      kfree(mem);
+      *pte |= PTE_V;
+      return 0;
+    }
+
+    kfree((void*)PGROUNDDOWN(pa));
+    return mem;
+  }
+}
+
+/**
+ * @brief getrefcount 获取内存的引用计数
+ * @param pa 指定的内存地址
+ * @return 引用计数
+ */
+int
+getrefcount(uint64 pa)
+{
+  return ref.ref_count[pa/PGSIZE];
+}
+
+/**
+ * @brief increaserefcount 增加内存的引用计数
+ * @param pa 指定的内存地址
+ * @return 0:成功 -1:失败
+ */
+int 
+increaserefcount(uint64 pa)
+{
+  if((char*)pa < end || pa >= PHYSTOP)
+    return -1;
+  acquire(&ref.lock);
+  ++ref.ref_count[pa/PGSIZE];
+  release(&ref.lock);
+  return 0;
+}
+
